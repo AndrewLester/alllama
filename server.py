@@ -80,7 +80,7 @@ async def home(request: Request):
 		f"{host}/completion",
 		json={"conversation": conversation, "key": os.environ.get("API_SECRET")},
 	)
-	res = await client.send(req, stream=True)
+	res = await client.send(req, stream=True, timeout=None)
 
 	content = (
 		json.loads(chunk)["choices"][0]["delta"].get("content", "")
