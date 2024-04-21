@@ -1,6 +1,7 @@
 import json
 import os
 from contextlib import asynccontextmanager
+from threading import Lock
 from typing import Iterator, cast
 
 import httpx
@@ -32,10 +33,15 @@ class CompletionRequest(BaseModel):
 	key: str
 
 
+completion_lock = Lock()
+
+
 @app.post("/completion")
 def completion(completion_request: CompletionRequest):
 	if completion_request.key != os.environ.get("API_SECRET"):
 		return Response(status_code=401)
+
+	completion_lock.acquire()
 
 	output = cast(
 		Iterator[CreateChatCompletionStreamResponse],
@@ -48,10 +54,14 @@ def completion(completion_request: CompletionRequest):
 
 	content = (json.dumps(chunk) for chunk in output)
 
+	def close():
+		content.close()
+		completion_lock.release()
+
 	return StreamingResponse(
 		content,
 		media_type="text/event-stream",
-		background=BackgroundTask(content.close),
+		background=BackgroundTask(close),
 	)
 
 
