@@ -1,5 +1,6 @@
-from llama_cpp import Llama, CreateChatCompletionStreamResponse
-from typing import cast, Iterator
+from typing import cast
+
+from llama_cpp import ChatCompletionRequestMessage, Llama
 
 llm = Llama(
 	model_path="./models/meta-llama-3-70B-instruct-IQ2_XS.gguf",
@@ -8,26 +9,18 @@ llm = Llama(
 	verbose=False,
 )
 
-message = input("Enter message: ")
+system_prompt = """
+				You are a chat bot assistant. You will now begin receiving prompts from a single user.
+				"""
 
-print(flush=True)
 
-output = cast(
-	Iterator[CreateChatCompletionStreamResponse],
-	llm.create_chat_completion(
-		messages=[
+def create_history():
+	return cast(
+		list[ChatCompletionRequestMessage],
+		[
 			{
 				"role": "system",
-				"content": "You are a chat bot assistant. You will now begin receiving prompts from a single user.",
+				"content": system_prompt,
 			},
-			{"role": "user", "content": message},
 		],
-		stop=["<|eot_id|>"],
-		stream=True,
-	),
-)
-
-for chunk in output:
-	if "content" in chunk["choices"][0]["delta"]:
-		print(chunk["choices"][0]["delta"]["content"], end="", flush=True)
-print()
+	)
