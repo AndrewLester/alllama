@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 from contextlib import asynccontextmanager
 from threading import Lock
 from typing import Iterator, cast
@@ -26,6 +27,11 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/ping")
 def ping():
 	return "Pong"
+
+
+@app.get("/stop")
+def stop():
+	os.kill(os.getpid(), signal.SIGTERM)
 
 
 class CompletionRequest(BaseModel):
