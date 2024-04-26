@@ -45,8 +45,8 @@ def stop(secret: str):
 	if secret != os.environ.get("CONTROL_SECRET"):
 		return Response(status_code=401)
 
-	server_stop_event.set()
 	server_status_condition.acquire()
+	server_stop_event.set()
 	server_status_condition.notify()
 	server_status_condition.release()
 
@@ -56,8 +56,8 @@ def start(secret: str):
 	if secret != os.environ.get("CONTROL_SECRET"):
 		return Response(status_code=401)
 
-	server_stop_event.clear()
 	server_status_condition.acquire()
+	server_stop_event.clear()
 	server_status_condition.notify()
 	server_status_condition.release()
 
@@ -145,7 +145,9 @@ def run_uvicorn():
 
 
 def run_proxy() -> multiprocessing.Process:
-	process = multiprocessing.Process(target=run_uvicorn, name="alllama-uvicorn")
+	process = multiprocessing.Process(
+		target=run_uvicorn, daemon=True, name="alllama-uvicorn"
+	)
 	process.start()
 	return process
 
@@ -210,6 +212,7 @@ if __name__ == "__main__":
 
 			server_status_condition.acquire()
 			server_status_condition.wait_for(lambda: server_stop_event.is_set())
+			server_status_condition.release()
 
 			print("Stopping llama.cpp server...")
 			server_process.terminate()
@@ -217,3 +220,4 @@ if __name__ == "__main__":
 
 			server_status_condition.acquire()
 			server_status_condition.wait_for(lambda: not server_stop_event.is_set())
+			server_status_condition.release()
