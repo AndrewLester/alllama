@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
 server_status_condition = multiprocessing.Condition()
 server_stop_event = multiprocessing.Event()
 
-app = FastAPI(lifespan=lifespan, server_status_condition=server_status_condition)
+app = FastAPI(lifespan=lifespan)
 
 security = HTTPBearer()
 
