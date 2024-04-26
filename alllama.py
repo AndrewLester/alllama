@@ -83,12 +83,20 @@ async def completion(
 	except httpx.ConnectError:
 		# TODO: Start llama.cpp server
 		return Response(
-			status_code=504,
+			status_code=500,
 			content="Starting up inference server... please wait 1 minute.",
 		)
 
+	async def stream_content():
+		try:
+			async for chunk in res.aiter_raw():
+				yield chunk
+		except httpx.RemoteProtocolError:
+			# Inference server was stopped, llama.cpp server doesn't follow protocol when force stopped
+			pass
+
 	return StreamingResponse(
-		res.aiter_raw(),
+		stream_content(),
 		status_code=res.status_code,
 		headers=res.headers,
 		media_type="text/event-stream",
@@ -106,29 +114,28 @@ def home():
 		http_client=http_client,
 	)
 
-	response = client.chat.completions.create(
-		model="llama-3",
-		messages=[
-			{
-				"role": "system",
-				"content": "You are Llama 3, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests.",
-			},
-			{"role": "user", "content": "Write me code for a snake game plz"},
-		],
-		stream=True,
-		stop=["<|eot_id|>"],
-	)
+	try:
+		response = client.chat.completions.create(
+			model="llama-3",
+			messages=[
+				{
+					"role": "system",
+					"content": "You are Llama 3, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests.",
+				},
+				{"role": "user", "content": "Write me code for a snake game plz"},
+			],
+			stream=True,
+			stop=["<|eot_id|>"],
+		)
+	except openai.InternalServerError as error:
+		return Response(status_code=500, content=error.body)
 
 	content = (chunk.choices[0].delta.content or "" for chunk in response)
-
-	def close():
-		response.close()
-		http_client.close()
 
 	return StreamingResponse(
 		content,
 		media_type="text/event-stream",
-		background=BackgroundTask(close),
+		background=BackgroundTask(http_client.close),
 	)
 
 
@@ -216,7 +223,8 @@ if __name__ == "__main__":
 
 			print("Stopping llama.cpp server...")
 			server_process.terminate()
-			server_process.wait()
+			server_process.terminate()  # Send two terminates to close existing connections
+			server_process.wait(timeout=5)
 
 			server_status_condition.acquire()
 			server_status_condition.wait_for(lambda: not server_stop_event.is_set())
