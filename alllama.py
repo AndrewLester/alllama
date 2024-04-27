@@ -4,9 +4,9 @@ import multiprocessing
 import os
 import queue
 import subprocess
-import threading
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, TypedDict, cast
+from datetime import datetime
+from typing import Annotated, Any
 
 import httpx
 import openai
@@ -30,15 +30,9 @@ async def lifespan(app: FastAPI):
 		yield {"client": client}
 
 
-class AppExtra(TypedDict):
-	server_stop_event: threading.Event
-	server_status_condition: threading.Condition
-	server_completion_event_message_queue: multiprocessing.Queue
-
-
-def get_app_extra() -> AppExtra:
-	return cast(AppExtra, app.extra)
-
+server_status_condition = multiprocessing.Condition()
+server_stop_event = multiprocessing.Event()
+server_completion_event_message_queue = multiprocessing.Queue()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -47,9 +41,7 @@ security = HTTPBearer()
 
 @app.get("/ping")
 def ping():
-	return {
-		"inference_server_status": not get_app_extra()["server_stop_event"].is_set()
-	}
+	return {"inference_server_status": not server_stop_event.is_set()}
 
 
 @app.get("/llama/stop")
@@ -57,12 +49,10 @@ def stop(secret: str):
 	if secret != os.environ.get("CONTROL_SECRET"):
 		return Response(status_code=401)
 
-	extra = get_app_extra()
-
-	extra["server_status_condition"].acquire()
-	extra["server_stop_event"].set()
-	extra["server_status_condition"].notify()
-	extra["server_status_condition"].release()
+	server_status_condition.acquire()
+	server_stop_event.set()
+	server_status_condition.notify()
+	server_status_condition.release()
 
 
 @app.get("/llama/start")
@@ -70,12 +60,10 @@ def start(secret: str):
 	if secret != os.environ.get("CONTROL_SECRET"):
 		return Response(status_code=401)
 
-	extra = get_app_extra()
-
-	extra["server_status_condition"].acquire()
-	extra["server_stop_event"].clear()
-	extra["server_status_condition"].notify()
-	extra["server_status_condition"].release()
+	server_status_condition.acquire()
+	server_stop_event.clear()
+	server_status_condition.notify()
+	server_status_condition.release()
 
 
 @app.post("/v1/chat/completions")
@@ -95,16 +83,14 @@ async def completion(
 		json=body,
 	)
 
-	extra = get_app_extra()
-
 	try:
 		res = await client.send(req, stream=True)
 	except httpx.ConnectError:
 		print("Auto-scaling up")
-		extra["server_status_condition"].acquire()
-		extra["server_stop_event"].clear()
-		extra["server_status_condition"].notify()
-		extra["server_status_condition"].release()
+		server_status_condition.acquire()
+		server_stop_event.clear()
+		server_status_condition.notify()
+		server_status_condition.release()
 
 		await asyncio.sleep(1)  # Give it a sec
 
@@ -115,7 +101,7 @@ async def completion(
 		)
 		res = await client.send(req, stream=True)
 
-	extra["server_completion_event_message_queue"].put_nowait("completion")
+	server_completion_event_message_queue.put_nowait(True)
 
 	async def stream_content():
 		try:
@@ -169,11 +155,10 @@ def home():
 	)
 
 
-def auto_scale(server_completion_event_message_queue: multiprocessing.Queue):
+def auto_scale():
 	while True:
 		try:
 			server_completion_event_message_queue.get(timeout=10 * 60)
-			print("msg received")
 		except queue.Empty:
 			if server_stop_event.is_set():
 				continue
@@ -185,17 +170,7 @@ def auto_scale(server_completion_event_message_queue: multiprocessing.Queue):
 			server_status_condition.release()
 
 
-def run_uvicorn(
-	server_stop_event: threading.Event,
-	server_status_condition: threading.Condition,
-	server_completion_event_message_queue: multiprocessing.Queue,
-):
-	app.extra = {
-		"server_stop_event": server_stop_event,
-		"server_status_condition": server_status_condition,
-		"server_completion_event_message_queue": server_completion_event_message_queue,
-	}
-
+def run_uvicorn():
 	uvicorn.run(
 		app,
 		host=host,
@@ -207,33 +182,17 @@ def run_uvicorn(
 	)
 
 
-def run_proxy(
-	server_stop_event: threading.Event,
-	server_status_condition: threading.Condition,
-	server_completion_event_message_queue: multiprocessing.Queue,
-) -> multiprocessing.Process:
+def run_proxy() -> multiprocessing.Process:
 	process = multiprocessing.Process(
-		target=run_uvicorn,
-		args=(
-			server_stop_event,
-			server_status_condition,
-			server_completion_event_message_queue,
-		),
-		daemon=True,
-		name="alllama-uvicorn",
+		target=run_uvicorn, daemon=True, name="alllama-uvicorn"
 	)
 	process.start()
 	return process
 
 
-def run_auto_scaler(
-	server_completion_event_message_queue: multiprocessing.Queue,
-) -> multiprocessing.Process:
+def run_auto_scaler() -> multiprocessing.Process:
 	process = multiprocessing.Process(
-		target=auto_scale,
-		args=(server_completion_event_message_queue,),
-		daemon=True,
-		name="alllama-auto-scaler",
+		target=auto_scale, daemon=True, name="alllama-auto-scaler"
 	)
 	process.start()
 	return process
@@ -290,34 +249,23 @@ if __name__ == "__main__":
 	if not dev:
 		port = 8000
 
-	with multiprocessing.Manager() as manager:
-		server_stop_event = manager.Event()
-		server_status_condition = manager.Condition()
-		server_completion_event_message_queue = cast(
-			multiprocessing.Queue, manager.Queue()
-		)
+	# "Daemon" processes
+	proxy_process = run_proxy()
+	auto_scale_process = run_auto_scaler()
 
-		# "Daemon" processes
-		proxy_process = run_proxy(
-			server_stop_event,
-			server_status_condition,
-			server_completion_event_message_queue,
-		)
-		auto_scale_process = run_auto_scaler(server_completion_event_message_queue)
+	while True:
+		print("Starting llama.cpp server...")
+		server_process = run_server(args.server, args.model, args.gpu_layers)
 
-		while True:
-			print("Starting llama.cpp server...")
-			server_process = run_server(args.server, args.model, args.gpu_layers)
+		server_status_condition.acquire()
+		server_status_condition.wait_for(lambda: server_stop_event.is_set())
+		server_status_condition.release()
 
-			server_status_condition.acquire()
-			server_status_condition.wait_for(lambda: server_stop_event.is_set())
-			server_status_condition.release()
+		print("Stopping llama.cpp server...")
+		server_process.terminate()
+		server_process.terminate()  # Send two terminates to close existing connections
+		server_process.wait(timeout=5)
 
-			print("Stopping llama.cpp server...")
-			server_process.terminate()
-			server_process.terminate()  # Send two terminates to close existing connections
-			server_process.wait(timeout=5)
-
-			server_status_condition.acquire()
-			server_status_condition.wait_for(lambda: not server_stop_event.is_set())
-			server_status_condition.release()
+		server_status_condition.acquire()
+		server_status_condition.wait_for(lambda: not server_stop_event.is_set())
+		server_status_condition.release()
