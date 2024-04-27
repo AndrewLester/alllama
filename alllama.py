@@ -70,7 +70,6 @@ async def completion(
 	request: Request,
 	credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
 	body: Annotated[Any, Body()],
-	background_tasks: BackgroundTasks,
 ):
 	if credentials.credentials != os.environ.get("API_SECRET"):
 		return Response(status_code=401)
