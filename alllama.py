@@ -10,7 +10,7 @@ from typing import Annotated, Any
 import httpx
 import openai
 import uvicorn
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, Request
+from fastapi import Body, Depends, FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.background import BackgroundTask
@@ -73,6 +73,8 @@ async def completion(
 ):
 	if credentials.credentials != os.environ.get("API_SECRET"):
 		return Response(status_code=401)
+
+	body = {"stop": ["<|eot_id|>"], **body}
 
 	client: httpx.AsyncClient = request.state.client
 	req = client.build_request(
